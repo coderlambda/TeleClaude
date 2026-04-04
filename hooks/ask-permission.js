@@ -68,8 +68,24 @@ async function main() {
     process.exit(0);
   }
 
-  process.stdout.write(JSON.stringify(result));
-  process.exit(result.decision === "allow" ? 0 : 2);
+  if (result.decision === "allow") {
+    process.stdout.write(JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "allow",
+      },
+    }));
+    process.exit(0);
+  } else {
+    process.stdout.write(JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        reason: result.reason ?? "Denied by user.",
+      },
+    }));
+    process.exit(0);
+  }
 }
 
 main();
