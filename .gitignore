@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+sessions.json
+daemon.lock
+bot.log
+configs.json
+restart-notify.json
+workspace/
