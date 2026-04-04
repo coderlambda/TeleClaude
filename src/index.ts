@@ -1,7 +1,9 @@
 import "dotenv/config";
 import { Bot, Context, GrammyError, HttpError } from "grammy";
 import { ClaudeRunner } from "./claude-runner.js";
-import { getConfig, setAutoreply } from "./config-store.js";
+import { CodexRunner } from "./codex-runner.js";
+import type { AgentRunner, SendResult } from "./agent-runner.js";
+import { getConfig, setAutoreply, setAgentType } from "./config-store.js";
 import { upsertChannelMeta } from "./channel-registry.js";
 import { collectOutbox, clearOutbox } from "./outbox.js";
 import { PermissionServer } from "./permission-server.js";
@@ -31,8 +33,15 @@ else logger.info(`Authorized users: ${[...authorizedIds].join(", ")}`);
 const PERMISSION_PORT = parseInt(process.env.PERMISSION_PORT ?? "3721");
 
 const bot = new Bot(token);
-const claude = new ClaudeRunner(ROOT_WORKSPACE);
+const claudeRunner = new ClaudeRunner(ROOT_WORKSPACE);
+const codexRunner = new CodexRunner(ROOT_WORKSPACE);
 const permServer = new PermissionServer(PERMISSION_PORT);
+
+/** Return the correct runner for a chat based on its configured agent type */
+function getRunner(chatId: string): AgentRunner {
+  const config = getConfig(chatId);
+  return config.agentType === "codex" ? codexRunner : claudeRunner;
+}
 
 // track permission and progress messages for cleanup
 interface PermInfo {
@@ -197,14 +206,17 @@ async function handleMessage(
   if (text === "/start") {
     const config = getConfig(chatId);
     await ctx.reply(
-      "Claude Code Agent\n\n" +
+      "TeleClaude Agent\n\n" +
       "/clear — 清除对话上下文（记忆保留）\n" +
       "/stop — 中止当前任务\n" +
+      "/agent claude — 切换到 Claude Code\n" +
+      "/agent codex — 切换到 OpenAI Codex\n" +
       "/enable_autoreply — 回复所有人的消息\n" +
       "/disable_autoreply — 仅回复命令\n" +
       "/restart — 重启 bot\n" +
       "/info — 状态信息\n\n" +
       `Chat ID: ${chatId}\n` +
+      `Agent: ${config.agentType}\n` +
       `Autoreply: ${config.autoreply ? "on" : "off"}`
     );
     return;
@@ -212,7 +224,7 @@ async function handleMessage(
 
   if (text === "/clear") {
     if (!isAuthorized(ctx)) { await ctx.reply("Unauthorized."); return; }
-    claude.clearSession(chatId);
+    getRunner(chatId).clearSession(chatId);
     await ctx.reply("上下文已清除，记忆保留。下次对话将开始新会话。");
     logger.info(`[chat:${chatId}] /clear by @${username}`);
     return;
@@ -247,9 +259,22 @@ async function handleMessage(
     return;
   }
 
+  if (text === "/agent claude" || text === "/agent codex") {
+    if (!isAuthorized(ctx)) { await ctx.reply("Unauthorized."); return; }
+    const agentType = text === "/agent codex" ? "codex" as const : "claude" as const;
+    setAgentType(chatId, agentType);
+    await ctx.reply(
+      agentType === "codex"
+        ? "Agent switched to Codex (OpenAI)."
+        : "Agent switched to Claude Code."
+    );
+    logger.info(`[chat:${chatId}] agent type → ${agentType} by @${username}`);
+    return;
+  }
+
   if (text === "/stop") {
     if (!isAuthorized(ctx)) { await ctx.reply("Unauthorized."); return; }
-    const stopped = claude.stop(chatId);
+    const stopped = getRunner(chatId).stop(chatId);
     await ctx.reply(stopped ? "Stopping current task..." : "No task running.");
     logger.info(`[chat:${chatId}] /stop by @${username} (was running: ${stopped})`);
     return;
@@ -266,13 +291,16 @@ async function handleMessage(
 
   if (text === "/info") {
     const config = getConfig(chatId);
-    const sessionId = claude.getSession(chatId);
-    const totalSessions = claude.listSessions().length;
+    const runner = getRunner(chatId);
+    const sessionId = runner.getSession(chatId);
+    const totalSessions = runner.listSessions().length;
     await ctx.reply(
       `PID: ${process.pid}\n` +
       `Chat ID: ${chatId}\n` +
+      `Agent: ${config.agentType}\n` +
       `Session: ${sessionId ? sessionId.slice(0, 8) + "…" : "none"}\n` +
       `Autoreply: ${config.autoreply ? "on" : "off"}\n` +
+      `Permission: ${config.permissionMode}\n` +
       `Total sessions: ${totalSessions}`
     );
     return;
@@ -317,7 +345,7 @@ async function handleMessage(
 
   enqueue(chatId, text, username);
 
-  if (claude.isRunning(chatId)) {
+  if (getRunner(chatId).isRunning(chatId)) {
     logger.info(`[chat:${chatId}] Agent busy — message queued`);
     return;
   }
@@ -332,7 +360,8 @@ async function handleMessage(
 async function processQueue(chatId: string) {
   const prompt = drainQueue(chatId);
   if (!prompt) return;
-  if (claude.isRunning(chatId)) {
+  const runner = getRunner(chatId);
+  if (runner.isRunning(chatId)) {
     // re-queue: shouldn't happen but be safe
     enqueue(chatId, prompt, "system");
     return;
@@ -340,12 +369,13 @@ async function processQueue(chatId: string) {
 
   const numChatId = Number(chatId);
   const config = getConfig(chatId);
+  const agentLabel = config.agentType === "codex" ? "Codex" : "Claude";
 
-  logger.info(`[chat:${chatId}] → Claude | "${prompt.slice(0, 100)}${prompt.length > 100 ? "…" : ""}"`);
+  logger.info(`[chat:${chatId}] → ${agentLabel} | "${prompt.slice(0, 100)}${prompt.length > 100 ? "…" : ""}"`);
 
   // ── progress message ──────────────────────────────────────────────────
 
-  const progressMsg = await bot.api.sendMessage(numChatId, "<b>Working...</b>", { parse_mode: "HTML" });
+  const progressMsg = await bot.api.sendMessage(numChatId, `<b>${agentLabel}: Working...</b>`, { parse_mode: "HTML" });
   progressMsgIds.set(chatId, progressMsg.message_id);
   const toolLines: string[] = [];
   let lastEditAt = 0;
@@ -356,15 +386,15 @@ async function processQueue(chatId: string) {
     lastEditAt = now;
     const shown = toolLines.slice(-8).join("\n");
     try {
-      await bot.api.editMessageText(numChatId, progressMsg.message_id, `<b>Working...</b>\n<blockquote>${escapeHtml(shown)}</blockquote>`, { parse_mode: "HTML" });
+      await bot.api.editMessageText(numChatId, progressMsg.message_id, `<b>${agentLabel}: Working...</b>\n<blockquote>${escapeHtml(shown)}</blockquote>`, { parse_mode: "HTML" });
     } catch {}
   }
 
-  // ── call Claude ───────────────────────────────────────────────────────
+  // ── call agent ────────────────────────────────────────────────────────
 
-  let result: Awaited<ReturnType<typeof claude.send>>;
+  let result: SendResult;
   try {
-    result = await claude.send(chatId, prompt, (toolName, summary) => {
+    result = await runner.send(chatId, prompt, (toolName, summary) => {
       if (toolName === "_text") {
         toolLines.push(summary);
       } else {
@@ -375,7 +405,7 @@ async function processQueue(chatId: string) {
     }, PERMISSION_PORT, config.permissionMode);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    logger.error(`[chat:${chatId}] Claude error: ${msg}`);
+    logger.error(`[chat:${chatId}] ${agentLabel} error: ${msg}`);
     try { await bot.api.deleteMessage(numChatId, progressMsg.message_id); } catch {}
     await bot.api.sendMessage(numChatId, `❌ ${msg}`);
     // check for more queued messages
@@ -583,8 +613,8 @@ async function shutdown(exitCode: number) {
   // 1. Deny all pending permission requests (unblocks hook processes)
   await permServer.stop().catch(() => {});
 
-  // 2. Kill all Claude subprocesses (SIGTERM → SIGKILL after 2s)
-  await claude.stopAll();
+  // 2. Kill all agent subprocesses (SIGTERM → SIGKILL after 2s)
+  await Promise.all([claudeRunner.stopAll(), codexRunner.stopAll()]);
 
   // 3. Stop Grammy poller
   await bot.stop().catch(() => {});
@@ -615,11 +645,14 @@ process.on("unhandledRejection", (err) => {
 
 // ─── startup ──────────────────────────────────────────────────────────────────
 
-logger.info(`Starting Telegram Claude Agent (pid=${process.pid})...`);
+logger.info(`Starting Telegram Agent (pid=${process.pid})...`);
 logger.info(`Root workspace: ${ROOT_WORKSPACE}`);
 
-// Periodic health check: prune dead claude processes every 30s
-setInterval(() => claude.pruneDeadProcesses(), 30_000).unref();
+// Periodic health check: prune dead agent processes every 30s
+setInterval(() => {
+  claudeRunner.pruneDeadProcesses();
+  codexRunner.pruneDeadProcesses();
+}, 30_000).unref();
 
 await permServer.start();
 

@@ -1,49 +1,64 @@
 import { spawn, ChildProcess } from "child_process";
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
 import { logger } from "./logger.js";
 import { isAlive } from "./process-utils.js";
 import type { AgentRunner, ProgressCallback, SendResult } from "./agent-runner.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const HOOK_SCRIPT = path.join(__dirname, "../hooks/ask-permission.js");
+// ── Codex JSON event types ──────────────────────────────────────────────────
 
-interface StreamEvent {
-  type: string;
-  subtype?: string;
-  is_error?: boolean;
-  result?: string;
-  session_id?: string;
-  duration_ms?: number;
-  total_cost_usd?: number;
-  message?: {
-    role?: string;
-    content?: Array<{
-      type: string;
-      text?: string;
-      name?: string;
-      input?: Record<string, unknown>;
-    }>;
+interface CodexThreadStarted {
+  type: "thread.started";
+  thread_id: string;
+}
+
+interface CodexTurnStarted {
+  type: "turn.started";
+}
+
+interface CodexItemStarted {
+  type: "item.started";
+  item: {
+    id: string;
+    type: string;
+    command?: string;
+    aggregated_output?: string;
+    exit_code?: number | null;
+    status?: string;
+    text?: string;
   };
 }
 
-function summarizeInput(toolName: string, input: Record<string, unknown>): string {
-  const s = (v: unknown) => String(v ?? "").slice(0, 80);
-  switch (toolName) {
-    case "Bash":       return s(input.command);
-    case "Read":       return s(input.file_path);
-    case "Write":      return s(input.file_path);
-    case "Edit":       return s(input.file_path);
-    case "Glob":       return s(input.pattern);
-    case "Grep":       return s(input.pattern);
-    case "WebFetch":   return s(input.url);
-    case "WebSearch":  return s(input.query);
-    default:           return JSON.stringify(input).slice(0, 80);
-  }
+interface CodexItemCompleted {
+  type: "item.completed";
+  item: {
+    id: string;
+    type: string;
+    command?: string;
+    aggregated_output?: string;
+    exit_code?: number | null;
+    status?: string;
+    text?: string;
+  };
 }
 
-export class ClaudeRunner implements AgentRunner {
+interface CodexTurnCompleted {
+  type: "turn.completed";
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+  };
+}
+
+type CodexEvent =
+  | CodexThreadStarted
+  | CodexTurnStarted
+  | CodexItemStarted
+  | CodexItemCompleted
+  | CodexTurnCompleted
+  | { type: string; [key: string]: unknown };
+
+export class CodexRunner implements AgentRunner {
   private rootWorkspace: string;
   private activeProcs = new Map<string, ChildProcess>();
 
@@ -56,7 +71,7 @@ export class ClaudeRunner implements AgentRunner {
   private workspaceDir(chatId: string): string {
     const dir = path.join(this.rootWorkspace, chatId);
     fs.mkdirSync(dir, { recursive: true });
-    this.seedClaudeMd(dir); // idempotent — skips if CLAUDE.md already exists
+    this.seedClaudeMd(dir);
     return dir;
   }
 
@@ -85,8 +100,8 @@ response and delivers the files automatically.
 \`\`\`
 
 ### File type detection
-- Images (.png .jpg .jpeg .gif .webp) → sent as photos
-- Everything else → sent as documents
+- Images (.png .jpg .jpeg .gif .webp) -> sent as photos
+- Everything else -> sent as documents
 
 The outbox is cleared automatically after each delivery.
 `);
@@ -95,19 +110,7 @@ The outbox is cleared automatically after each delivery.
   // ── session ────────────────────────────────────────────────────────────────
 
   private sessionFile(chatId: string): string {
-    const dir = this.workspaceDir(chatId);
-    const newPath = path.join(dir, ".session-claude");
-    // migrate legacy .session → .session-claude (one-time)
-    if (!fs.existsSync(newPath)) {
-      const legacyPath = path.join(dir, ".session");
-      if (fs.existsSync(legacyPath)) {
-        try {
-          fs.renameSync(legacyPath, newPath);
-          logger.info(`[chat:${chatId}] Migrated .session → .session-claude`);
-        } catch {}
-      }
-    }
-    return newPath;
+    return path.join(this.workspaceDir(chatId), ".session-codex");
   }
 
   private readSession(chatId: string): string | null {
@@ -138,7 +141,7 @@ The outbox is cleared automatically after each delivery.
   clearSession(chatId: string) {
     const old = this.readSession(chatId);
     this.deleteSession(chatId);
-    logger.info(`[chat:${chatId}] Session cleared (was: ${old ?? "none"}) — workspace kept`);
+    logger.info(`[chat:${chatId}] Codex session cleared (was: ${old ?? "none"}) — workspace kept`);
   }
 
   // ── stop running process ───────────────────────────────────────────────────
@@ -146,33 +149,29 @@ The outbox is cleared automatically after each delivery.
   stop(chatId: string): boolean {
     const proc = this.activeProcs.get(chatId);
     if (!proc || !proc.pid) return false;
-    // SIGTERM first (lets Claude clean up hooks), escalate to SIGKILL
     try { process.kill(-proc.pid, "SIGTERM"); } catch { proc.kill("SIGTERM"); }
     setTimeout(() => {
       if (proc.pid && isAlive(proc.pid)) {
-        logger.warn(`[chat:${chatId}] Claude did not exit, force killing`);
+        logger.warn(`[chat:${chatId}] Codex did not exit, force killing`);
         try { process.kill(-proc.pid, "SIGKILL"); } catch { proc.kill("SIGKILL"); }
       }
     }, 5_000);
     return true;
   }
 
-  /** Kill all active subprocesses. SIGTERM first, then SIGKILL after 2s. */
   stopAll(): Promise<void> {
     if (this.activeProcs.size === 0) return Promise.resolve();
-    // Phase 1: SIGTERM (process group) — lets Claude clean up hook children
     for (const [chatId, proc] of this.activeProcs) {
-      logger.info(`[chat:${chatId}] Stopping subprocess on shutdown`);
+      logger.info(`[chat:${chatId}] Stopping Codex subprocess on shutdown`);
       if (proc.pid) {
         try { process.kill(-proc.pid, "SIGTERM"); } catch { proc.kill("SIGTERM"); }
       }
     }
-    // Phase 2: SIGKILL survivors after 2s
     return new Promise((resolve) => {
       setTimeout(() => {
         for (const [chatId, proc] of this.activeProcs) {
           if (proc.pid && isAlive(proc.pid)) {
-            logger.warn(`[chat:${chatId}] Force killing subprocess`);
+            logger.warn(`[chat:${chatId}] Force killing Codex subprocess`);
             try { process.kill(-proc.pid, "SIGKILL"); } catch { proc.kill("SIGKILL"); }
           }
         }
@@ -186,11 +185,10 @@ The outbox is cleared automatically after each delivery.
     return this.activeProcs.has(chatId);
   }
 
-  /** Periodic health check: remove dead processes from activeProcs */
   pruneDeadProcesses() {
     for (const [chatId, proc] of this.activeProcs) {
       if (proc.pid && !isAlive(proc.pid)) {
-        logger.warn(`[chat:${chatId}] Pruned dead claude process (pid=${proc.pid})`);
+        logger.warn(`[chat:${chatId}] Pruned dead codex process (pid=${proc.pid})`);
         this.activeProcs.delete(chatId);
       }
     }
@@ -202,7 +200,7 @@ The outbox is cleared automatically after each delivery.
     chatId: string,
     message: string,
     onProgress?: ProgressCallback,
-    permissionPort?: number,
+    _permissionPort?: number,
     permissionMode: "auto" | "ask" = "auto",
   ): Promise<SendResult> {
     if (this.activeProcs.has(chatId)) {
@@ -212,50 +210,41 @@ The outbox is cleared automatically after each delivery.
     const sessionId = this.readSession(chatId);
     const dir = this.workspaceDir(chatId);
 
-    const args = [
-      "-p", message,
-      "--output-format", "stream-json",
-      "--verbose",
-    ];
-    if (sessionId) args.push("--resume", sessionId);
-
-    if (permissionMode === "auto") {
-      args.push("--dangerously-skip-permissions");
+    let args: string[];
+    if (sessionId) {
+      // resume existing session
+      args = ["exec", "resume", "--json", "--skip-git-repo-check", sessionId, message];
     } else {
-      // ask mode: auto-approve edits, prompt user via Telegram for Bash
-      args.push("--permission-mode", "acceptEdits");
-      if (permissionPort) {
-        const hookSettings = {
-          hooks: {
-            PreToolUse: [{
-              matcher: "Bash",
-              hooks: [{ type: "command", command: `node ${HOOK_SCRIPT}` }],
-            }],
-          },
-        };
-        args.push("--settings", JSON.stringify(hookSettings));
-      }
+      // new session
+      args = ["exec", "--json", "--skip-git-repo-check", "-C", dir, message];
+    }
+
+    // permission / sandbox mode
+    if (permissionMode === "auto") {
+      args.push("--dangerously-bypass-approvals-and-sandbox");
+    } else {
+      args.push("--sandbox", "workspace-write");
     }
 
     logger.info(
-      `[chat:${chatId}] → Claude | resume=${!!sessionId} | "${message.slice(0, 80)}${message.length > 80 ? "…" : ""}"`
+      `[chat:${chatId}] → Codex | resume=${!!sessionId} | "${message.slice(0, 80)}${message.length > 80 ? "…" : ""}"`
     );
 
     const start = Date.now();
 
     return new Promise((resolve, reject) => {
-      const env: NodeJS.ProcessEnv = { ...process.env };
-      if (permissionPort) {
-        env.BOT_CHAT_ID = chatId;
-        env.PERMISSION_PORT = String(permissionPort);
-      }
-
-      const proc = spawn("claude", args, { cwd: dir, env, stdio: ["ignore", "pipe", "pipe"], detached: true });
+      const proc = spawn("codex", args, {
+        cwd: dir,
+        env: { ...process.env },
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true,
+      });
       this.activeProcs.set(chatId, proc);
 
       let lineBuffer = "";
-      let finalResult: StreamEvent | null = null;
       let stderr = "";
+      let threadId: string | null = null;
+      const agentMessages: string[] = [];
 
       proc.stdout.on("data", (chunk: Buffer) => {
         lineBuffer += chunk.toString();
@@ -265,9 +254,8 @@ The outbox is cleared automatically after each delivery.
         for (const line of lines) {
           if (!line.trim()) continue;
           try {
-            const event: StreamEvent = JSON.parse(line);
-            this.handleEvent(chatId, event, onProgress);
-            if (event.type === "result") finalResult = event;
+            const event: CodexEvent = JSON.parse(line);
+            this.handleEvent(chatId, event, onProgress, agentMessages, (id) => { threadId = id; });
           } catch { /* skip malformed lines */ }
         }
       });
@@ -276,7 +264,7 @@ The outbox is cleared automatically after each delivery.
 
       proc.on("error", (err) => {
         this.activeProcs.delete(chatId);
-        reject(new Error(`Failed to start Claude: ${err.message}`));
+        reject(new Error(`Failed to start Codex: ${err.message}`));
       });
 
       proc.on("close", (code, signal) => {
@@ -289,42 +277,78 @@ The outbox is cleared automatically after each delivery.
         }
 
         if (code !== 0) {
-          logger.error(`[chat:${chatId}] Claude exited ${code} after ${elapsed}ms`);
+          logger.error(`[chat:${chatId}] Codex exited ${code} after ${elapsed}ms`);
           if (stderr) logger.error(`[chat:${chatId}] stderr: ${stderr.trim()}`);
-          reject(new Error(`Claude exited with code ${code}\n${stderr}`));
+          reject(new Error(`Codex exited with code ${code}\n${stderr}`));
           return;
         }
 
-        if (!finalResult) {
-          reject(new Error("No result received from Claude."));
+        // Save session if we got a thread_id
+        if (threadId) {
+          this.writeSession(chatId, threadId);
+        }
+
+        const finalText = agentMessages.join("\n\n").trim();
+        if (!finalText) {
+          reject(new Error("No result received from Codex."));
           return;
         }
 
-        if (finalResult.is_error) {
-          logger.error(`[chat:${chatId}] Claude error: ${finalResult.result}`);
-          reject(new Error(finalResult.result ?? "Unknown error"));
-          return;
-        }
-
-        this.writeSession(chatId, finalResult.session_id!);
         logger.info(
-          `[chat:${chatId}] ← Claude | ${elapsed}ms | $${(finalResult.total_cost_usd ?? 0).toFixed(4)} | session:${finalResult.session_id}`
+          `[chat:${chatId}] ← Codex | ${elapsed}ms | session:${threadId ?? "none"}`
         );
-        resolve({ text: finalResult.result ?? "", workspaceDir: dir });
+        resolve({ text: finalText, workspaceDir: dir });
       });
     });
   }
 
-  private handleEvent(chatId: string, event: StreamEvent, onProgress?: ProgressCallback) {
-    if (event.type !== "assistant" || !onProgress) return;
-    for (const block of event.message?.content ?? []) {
-      if (block.type === "tool_use" && block.name) {
-        const summary = summarizeInput(block.name, (block.input ?? {}) as Record<string, unknown>);
-        onProgress(block.name, summary);
-      } else if (block.type === "text" && block.text) {
-        // first line of Claude's text as a status update
-        const line = block.text.split("\n")[0].slice(0, 100);
-        if (line.trim()) onProgress("_text", line);
+  private handleEvent(
+    chatId: string,
+    event: CodexEvent,
+    onProgress?: ProgressCallback,
+    agentMessages?: string[],
+    onThreadId?: (id: string) => void,
+  ) {
+    switch (event.type) {
+      case "thread.started": {
+        const e = event as CodexThreadStarted;
+        onThreadId?.(e.thread_id);
+        logger.info(`[chat:${chatId}] Codex thread started: ${e.thread_id}`);
+        break;
+      }
+
+      case "item.completed": {
+        const e = event as CodexItemCompleted;
+        if (e.item.type === "agent_message" && e.item.text) {
+          agentMessages?.push(e.item.text);
+          if (onProgress) {
+            const line = e.item.text.split("\n")[0].slice(0, 100);
+            if (line.trim()) onProgress("_text", line);
+          }
+        } else if (e.item.type === "command_execution" && e.item.command) {
+          if (onProgress) {
+            onProgress("Bash", e.item.command.slice(0, 80));
+          }
+        }
+        break;
+      }
+
+      case "item.started": {
+        const e = event as CodexItemStarted;
+        if (e.item.type === "command_execution" && e.item.command && onProgress) {
+          onProgress("Bash", e.item.command.slice(0, 80));
+        }
+        break;
+      }
+
+      case "turn.completed": {
+        const e = event as CodexTurnCompleted;
+        if (e.usage) {
+          logger.info(
+            `[chat:${chatId}] Codex turn done | in=${e.usage.input_tokens ?? 0} out=${e.usage.output_tokens ?? 0}`
+          );
+        }
+        break;
       }
     }
   }
