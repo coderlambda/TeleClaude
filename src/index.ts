@@ -194,12 +194,14 @@ function scheduleFlush(chatId: string) {
 
 async function handleMessage(
   chatId: string,
-  text: string,
+  rawText: string,
   ctx: Context,
   isChannel: boolean,
 ) {
   recordMeta(ctx, chatId);
   const username = ctx.from?.username ?? ctx.from?.first_name ?? (isChannel ? "channel" : "unknown");
+  // strip @botname suffix from commands (e.g. /clear@MyBot → /clear)
+  const text = rawText.replace(/@\S+/, "").trim();
 
   // ── commands — handled immediately ────────────────────────────────────
 
