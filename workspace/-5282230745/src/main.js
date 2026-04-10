@@ -491,6 +491,115 @@ const weaponDefs = {
       weapon.zones = [];
     },
   },
+  meteor_call: {
+    label: "Meteor",
+    rarity: "rare",
+    maxLevel: 5,
+    createState: () => ({ id: "meteor_call", level: 1, cooldown: 0, strikes: [] }),
+    update(weapon, delta) {
+      weapon.cooldown -= delta;
+      if (weapon.cooldown <= 0) {
+        const target = getRandomEnemy();
+        if (target) {
+          const count = 1 + Math.floor((weapon.level - 1) / 2);
+          for (let i = 0; i < count; i += 1) {
+            const scatter = weapon.level >= 4 ? 2.2 : 1.2;
+            const position = target.mesh.position.clone().add(new THREE.Vector3(random(-scatter, scatter), 0, random(-scatter, scatter)));
+            if (new THREE.Vector2(position.x, position.z).length() > worldRadius - 2) continue;
+            const marker = new THREE.Mesh(
+              new THREE.RingGeometry(1.1, 1.6 + weapon.level * 0.25, 28),
+              new THREE.MeshBasicMaterial({ color: 0xffa45b, transparent: true, opacity: 0.8 }),
+            );
+            marker.rotation.x = -Math.PI / 2;
+            marker.position.set(position.x, 0.1, position.z);
+            scene.add(marker);
+            weapon.strikes.push({
+              marker,
+              position,
+              delay: 0.75,
+              radius: 2 + weapon.level * 0.45,
+              damage: (26 + weapon.level * 6) * player.damageMultiplier,
+            });
+          }
+        }
+        weapon.cooldown = Math.max(2.6, 5.8 - weapon.level * 0.35) * player.cooldownMultiplier;
+      }
+      for (let i = weapon.strikes.length - 1; i >= 0; i -= 1) {
+        const strike = weapon.strikes[i];
+        strike.delay -= delta;
+        strike.marker.material.opacity = 0.3 + Math.max(strike.delay, 0) * 0.7;
+        strike.marker.scale.setScalar(1 + Math.max(0, 0.75 - strike.delay) * 0.7);
+        if (strike.delay <= 0) {
+          scene.remove(strike.marker);
+          spawnImpactBurst(strike.position, strike.radius, 0xffb36a, 0xff6b1a);
+          for (const enemy of world.enemies) {
+            if (enemy.mesh.position.distanceTo(strike.position) <= strike.radius + enemy.radius) {
+              enemy.health -= strike.damage;
+            }
+          }
+          weapon.strikes.splice(i, 1);
+        }
+      }
+    },
+    cleanup(weapon) {
+      for (const strike of weapon.strikes) scene.remove(strike.marker);
+      weapon.strikes = [];
+    },
+  },
+  totem_field: {
+    label: "Totem",
+    rarity: "uncommon",
+    maxLevel: 5,
+    createState: () => ({ id: "totem_field", level: 1, cooldown: 0, totems: [] }),
+    update(weapon, delta) {
+      weapon.cooldown -= delta;
+      const desired = weapon.level >= 5 ? 2 : 1;
+      if (weapon.cooldown <= 0 && weapon.totems.length < desired) {
+        const angle = state.elapsed * 0.8 + weapon.totems.length * Math.PI;
+        const distance = 4.2 + weapon.level * 0.35;
+        const position = player.position.clone().add(new THREE.Vector3(Math.cos(angle) * distance, 0, Math.sin(angle) * distance));
+        if (new THREE.Vector2(position.x, position.z).length() <= worldRadius - 2) {
+          const mesh = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.35, 0.55, 2.8, 6),
+            new THREE.MeshStandardMaterial({ color: 0xb7f1d9, emissive: 0x1b7f61, emissiveIntensity: 1 }),
+          );
+          mesh.position.set(position.x, 1.4, position.z);
+          mesh.castShadow = true;
+          scene.add(mesh);
+          weapon.totems.push({
+            mesh,
+            ttl: 10 + weapon.level * 1.2,
+            cooldown: 0.18,
+            damage: (9 + weapon.level * 2.4) * player.damageMultiplier,
+            range: 8 + weapon.level * 0.7,
+          });
+        }
+        weapon.cooldown = Math.max(2.6, 6.5 - weapon.level * 0.35) * player.cooldownMultiplier;
+      }
+      for (let i = weapon.totems.length - 1; i >= 0; i -= 1) {
+        const totem = weapon.totems[i];
+        totem.ttl -= delta;
+        totem.cooldown -= delta;
+        totem.mesh.rotation.y += delta * 1.2;
+        if (totem.cooldown <= 0) {
+          const target = getNearestEnemyFrom(totem.mesh.position, totem.range);
+          if (target) {
+            target.health -= totem.damage;
+            spawnArcVisual(totem.mesh.position, target.mesh.position);
+            totem.cooldown = Math.max(0.3, 0.8 - weapon.level * 0.05) * player.cooldownMultiplier;
+          }
+        }
+        if (totem.ttl <= 0) {
+          scene.remove(totem.mesh);
+          weapon.totems.splice(i, 1);
+        }
+      }
+    },
+    cleanup(weapon) {
+      for (const totem of weapon.totems) scene.remove(totem.mesh);
+      weapon.totems = [];
+    },
+  },
 };
 
 const ambient = new THREE.HemisphereLight(0xb5d7ff, 0x162411, 1.4);
@@ -645,6 +754,11 @@ function getNearestEnemy() {
   return nearest;
 }
 
+function getRandomEnemy() {
+  if (world.enemies.length === 0) return null;
+  return world.enemies[Math.floor(Math.random() * world.enemies.length)];
+}
+
 function getNearestEnemyFrom(position, maxDistance, excluded = new Set()) {
   let nearest = null;
   let nearestDistance = maxDistance * maxDistance;
@@ -672,6 +786,26 @@ function spawnArcVisual(start, end) {
   mesh.quaternion.setFromUnitVectors(axis, direction.clone().normalize());
   scene.add(mesh);
   world.hazards.push({ mesh, ttl: 0.12, triggered: true, visualOnly: true });
+}
+
+function spawnImpactBurst(position, radius, color, emissive) {
+  const mesh = new THREE.Mesh(
+    new THREE.RingGeometry(radius * 0.5, radius, 36),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.92 }),
+  );
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.position.set(position.x, 0.12, position.z);
+  scene.add(mesh);
+  world.hazards.push({
+    mesh,
+    ttl: 0.22,
+    triggered: true,
+    visualOnly: true,
+    onUpdate() {
+      mesh.scale.setScalar(1 + (0.22 - Math.max(this.ttl, 0)) * 2.2);
+      mesh.material.opacity = Math.max(0, this.ttl / 0.22);
+    },
+  });
 }
 
 function spawnProjectile({ direction, offsetAngle = 0, speed, ttl, damage, radius, collisionRadius, pierce, color, emissive, scale = null, spin = 0 }) {
@@ -928,6 +1062,7 @@ function updateHazards(delta) {
   for (let i = world.hazards.length - 1; i >= 0; i -= 1) {
     const hazard = world.hazards[i];
     hazard.ttl -= delta;
+    hazard.onUpdate?.call(hazard, delta);
     if (!hazard.triggered && hazard.ttl <= 0) {
       hazard.triggered = true;
       if (hazard.mesh.position.distanceTo(player.position) <= hazard.radius + player.radius && player.invuln <= 0) {
