@@ -99,7 +99,8 @@ The outbox is cleared automatically after each delivery.
 
 ## Scheduled Tasks (Cron Jobs)
 
-You can create scheduled tasks by writing to \`crons.json\` in this workspace.
+**IMPORTANT: Do NOT use the built-in CronCreate tool — it does not work in this environment.**
+Instead, create scheduled tasks by writing to \`crons.json\` in this workspace.
 Jobs are synced to the system crontab automatically.
 
 ### crons.json format
