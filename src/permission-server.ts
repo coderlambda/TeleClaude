@@ -67,7 +67,26 @@ export class PermissionServer {
     return new Promise<void>((resolve) => this.server.close(() => resolve()));
   }
 
+  private cronHandler?: (chatId: string, jobId: string) => void;
+
+  onCronTrigger(fn: (chatId: string, jobId: string) => void) { this.cronHandler = fn; }
+
   private handle(req: http.IncomingMessage, res: http.ServerResponse) {
+    if (req.method === "POST" && req.url === "/cron") {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        try {
+          const { chatId, jobId } = JSON.parse(body);
+          this.cronHandler?.(chatId, jobId);
+          res.writeHead(200); res.end("ok");
+        } catch {
+          res.writeHead(400); res.end("bad request");
+        }
+      });
+      return;
+    }
+
     if (req.method !== "POST" || req.url !== "/ask") {
       res.writeHead(404); res.end(); return;
     }

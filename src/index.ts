@@ -37,7 +37,7 @@ const bot = new Bot(token);
 const claudeRunner = new ClaudeRunner(ROOT_WORKSPACE);
 const codexRunner = new CodexRunner(ROOT_WORKSPACE);
 const permServer = new PermissionServer(PERMISSION_PORT);
-const cronManager = new CronManager(ROOT_WORKSPACE);
+const cronManager = new CronManager(ROOT_WORKSPACE, PERMISSION_PORT);
 
 /** Return the correct runner for a chat based on its configured agent type */
 function getRunner(chatId: string): AgentRunner {
@@ -679,7 +679,7 @@ setInterval(() => {
 
 await permServer.start();
 
-// cron: when a job fires, enqueue the prompt and flush
+// cron: agent writes crons.json → synced to system crontab → curl /cron → trigger
 cronManager.onTrigger((chatId, prompt, jobName) => {
   logger.info(`[chat:${chatId}] Cron "${jobName}" triggered`);
   enqueue(chatId, `[Cron: ${jobName}] ${prompt}`, "cron");
@@ -687,6 +687,7 @@ cronManager.onTrigger((chatId, prompt, jobName) => {
     scheduleFlush(chatId);
   }
 });
+permServer.onCronTrigger((chatId, jobId) => cronManager.trigger(chatId, jobId));
 cronManager.start();
 
 bot.start({
