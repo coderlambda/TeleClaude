@@ -687,7 +687,7 @@ cronManager.onTrigger((chatId, prompt, jobName) => {
     scheduleFlush(chatId);
   }
 });
-permServer.onCronTrigger((chatId, jobId) => cronManager.trigger(chatId, jobId));
+permServer.onCronTrigger((chatId, jobId, outputFile) => cronManager.trigger(chatId, jobId, outputFile));
 cronManager.start();
 
 bot.start({

@@ -8,6 +8,7 @@ export interface CronJob {
   name: string;
   schedule: string; // cron expression: "min hour dom mon dow"
   prompt: string;   // message to send to agent when triggered
+  command?: string; // optional shell command — output saved to logs/ and path passed to agent
   enabled: boolean;
   createdAt: string;
   lastRun?: string;
@@ -45,7 +46,7 @@ export class CronManager {
   }
 
   /** Called by HTTP trigger endpoint */
-  trigger(chatId: string, jobId: string) {
+  trigger(chatId: string, jobId: string, outputFile?: string) {
     const jobs = this.loadJobs(chatId);
     const job = jobs.find(j => j.id === jobId);
     if (!job) {
@@ -54,8 +55,15 @@ export class CronManager {
     }
     job.lastRun = new Date().toISOString();
     this.saveJobs(chatId, jobs);
-    logger.info(`[cron] Fired "${job.name}" for chat:${chatId}`);
-    this.handler?.(chatId, job.prompt, job.name);
+
+    let prompt = job.prompt;
+    if (outputFile) {
+      prompt += `\n[Script output: ${outputFile}]`;
+      logger.info(`[cron] Fired "${job.name}" for chat:${chatId} (output: ${outputFile})`);
+    } else {
+      logger.info(`[cron] Fired "${job.name}" for chat:${chatId}`);
+    }
+    this.handler?.(chatId, prompt, job.name);
   }
 
   // ── crons.json management ──────────────────────────────────────────────
@@ -106,9 +114,24 @@ export class CronManager {
         if (!job.enabled) continue;
         const parts = job.schedule.trim().split(/\s+/);
         if (parts.length !== 5) continue;
-        // crontab line: schedule curl trigger
-        const curlCmd = `curl -sf -X POST http://127.0.0.1:${this.port}/cron -H 'Content-Type: application/json' -d '${JSON.stringify({ chatId, jobId: job.id })}' > /dev/null 2>&1`;
-        entries.push(`${job.schedule} ${curlCmd} ${MARKER}:${chatId}:${job.id}`);
+
+        const triggerUrl = `http://127.0.0.1:${this.port}/cron`;
+        let cronLine: string;
+
+        if (job.command) {
+          // run script → save output to logs/ → trigger with output path
+          const logsDir = path.join(this.rootWorkspace, chatId, "cron-logs");
+          fs.mkdirSync(logsDir, { recursive: true });
+          const logFile = path.join(logsDir, `${job.id}.log`);
+          const escaped = job.command.replace(/'/g, "'\\''");
+          // run command, capture stdout+stderr to log file, then curl trigger with output path
+          cronLine = `${job.schedule} bash -c '${escaped}' > ${logFile} 2>&1; curl -sf -X POST ${triggerUrl} -H "Content-Type: application/json" -d '${JSON.stringify({ chatId, jobId: job.id, outputFile: logFile })}' > /dev/null 2>&1 ${MARKER}:${chatId}:${job.id}`;
+        } else {
+          // prompt-only: just trigger
+          cronLine = `${job.schedule} curl -sf -X POST ${triggerUrl} -H 'Content-Type: application/json' -d '${JSON.stringify({ chatId, jobId: job.id })}' > /dev/null 2>&1 ${MARKER}:${chatId}:${job.id}`;
+        }
+
+        entries.push(cronLine);
       }
     }
 

@@ -100,7 +100,7 @@ The outbox is cleared automatically after each delivery.
 ## Scheduled Tasks (Cron Jobs)
 
 You can create scheduled tasks by writing to \`crons.json\` in this workspace.
-The service checks the schedule every 60 seconds and sends the prompt to you automatically.
+Jobs are synced to the system crontab automatically.
 
 ### crons.json format
 \`\`\`json
@@ -112,18 +112,33 @@ The service checks the schedule every 60 seconds and sends the prompt to you aut
     "prompt": "Generate and send the daily summary report",
     "enabled": true,
     "createdAt": "2026-01-01T00:00:00Z"
+  },
+  {
+    "id": "unique-id-2",
+    "name": "Health Check",
+    "schedule": "0 * * * *",
+    "prompt": "Analyze the health check results and alert if anything is wrong",
+    "command": "python3 scripts/health_check.py",
+    "enabled": true,
+    "createdAt": "2026-01-01T00:00:00Z"
   }
 ]
 \`\`\`
 
+### Fields
+- \`prompt\` — message sent to you when the job fires
+- \`command\` (optional) — shell script to run before triggering; output is saved to \`cron-logs/<id>.log\` and the path is appended to your prompt as \`[Script output: path]\`
+
 ### Schedule format (cron expression)
 \`min hour dom mon dow\`
 - \`0 9 * * *\` — every day at 9:00 AM
-- \`*/30 * * * *\` — every 30 minutes
 - \`0 9 * * 1-5\` — weekdays at 9:00 AM
 - \`0 0 1 * *\` — first of every month at midnight
 
-When a cron job fires, you receive: \`[Cron: job-name] prompt-text\`
+### What you receive
+- Prompt-only job: \`[Cron: job-name] prompt-text\`
+- Script job: \`[Cron: job-name] prompt-text\\n[Script output: cron-logs/id.log]\`
+  You can read the log file to see the script's output.
 `);
   }
 
