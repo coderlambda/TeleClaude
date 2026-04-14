@@ -65,6 +65,13 @@ export class ClaudeRunner implements AgentRunner {
     if (fs.existsSync(claudeMd)) return;
     fs.writeFileSync(claudeMd, `# Agent Instructions
 
+## Receiving Files from the User
+
+Files sent by the user are saved to \`inbox/\` (relative to this workspace).
+When a user sends a file, you will receive a message like:
+\`[User sent file: inbox/filename.pdf]\`
+You can read, analyze, or process these files directly from the inbox path.
+
 ## Sending Files to the User
 
 To send files or images back to the user via Telegram, place them in the \`outbox/\`
@@ -89,6 +96,34 @@ response and delivers the files automatically.
 - Everything else → sent as documents
 
 The outbox is cleared automatically after each delivery.
+
+## Scheduled Tasks (Cron Jobs)
+
+You can create scheduled tasks by writing to \`crons.json\` in this workspace.
+The service checks the schedule every 60 seconds and sends the prompt to you automatically.
+
+### crons.json format
+\`\`\`json
+[
+  {
+    "id": "unique-id",
+    "name": "Daily Report",
+    "schedule": "0 9 * * *",
+    "prompt": "Generate and send the daily summary report",
+    "enabled": true,
+    "createdAt": "2026-01-01T00:00:00Z"
+  }
+]
+\`\`\`
+
+### Schedule format (cron expression)
+\`min hour dom mon dow\`
+- \`0 9 * * *\` — every day at 9:00 AM
+- \`*/30 * * * *\` — every 30 minutes
+- \`0 9 * * 1-5\` — weekdays at 9:00 AM
+- \`0 0 1 * *\` — first of every month at midnight
+
+When a cron job fires, you receive: \`[Cron: job-name] prompt-text\`
 `);
   }
 

@@ -8,6 +8,7 @@ import { upsertChannelMeta } from "./channel-registry.js";
 import { collectOutbox, clearOutbox } from "./outbox.js";
 import { PermissionServer } from "./permission-server.js";
 import { setPermissionMode } from "./config-store.js";
+import { CronManager } from "./cron-manager.js";
 import { InputFile } from "grammy";
 import { logger } from "./logger.js";
 import { RESTART_CODE } from "./constants.js";
@@ -36,6 +37,7 @@ const bot = new Bot(token);
 const claudeRunner = new ClaudeRunner(ROOT_WORKSPACE);
 const codexRunner = new CodexRunner(ROOT_WORKSPACE);
 const permServer = new PermissionServer(PERMISSION_PORT);
+const cronManager = new CronManager(ROOT_WORKSPACE);
 
 /** Return the correct runner for a chat based on its configured agent type */
 function getRunner(chatId: string): AgentRunner {
@@ -213,6 +215,7 @@ async function handleMessage(
       "/stop — 中止当前任务\n" +
       "/agent claude — 切换到 Claude Code\n" +
       "/agent codex — 切换到 OpenAI Codex\n" +
+      "/cron — 查看定时任务\n" +
       "/enable_autoreply — 回复所有人的消息\n" +
       "/disable_autoreply — 仅回复命令\n" +
       "/restart — 重启 bot\n" +
@@ -296,6 +299,7 @@ async function handleMessage(
     const runner = getRunner(chatId);
     const sessionId = runner.getSession(chatId);
     const totalSessions = runner.listSessions().length;
+    const cronCount = cronManager.loadJobs(chatId).filter(j => j.enabled).length;
     await ctx.reply(
       `PID: ${process.pid}\n` +
       `Chat ID: ${chatId}\n` +
@@ -303,8 +307,22 @@ async function handleMessage(
       `Session: ${sessionId ? sessionId.slice(0, 8) + "…" : "none"}\n` +
       `Autoreply: ${config.autoreply ? "on" : "off"}\n` +
       `Permission: ${config.permissionMode}\n` +
+      `Cron jobs: ${cronCount}\n` +
       `Total sessions: ${totalSessions}`
     );
+    return;
+  }
+
+  if (text === "/cron") {
+    const jobs = cronManager.loadJobs(chatId);
+    if (jobs.length === 0) {
+      await ctx.reply("No cron jobs. The agent can create them by writing to crons.json.");
+      return;
+    }
+    const lines = jobs.map(j =>
+      `${j.enabled ? "●" : "○"} <b>${escapeHtml(j.name)}</b>\n  <code>${escapeHtml(j.schedule)}</code> → ${escapeHtml(j.prompt.slice(0, 60))}${j.lastRun ? `\n  Last: ${j.lastRun.slice(0, 16)}` : ""}`
+    );
+    await ctx.reply(lines.join("\n\n"), { parse_mode: "HTML" });
     return;
   }
 
@@ -612,13 +630,16 @@ async function shutdown(exitCode: number) {
   shuttingDown = true;
   logger.info(`Shutting down (exit code ${exitCode})...`);
 
-  // 1. Deny all pending permission requests (unblocks hook processes)
+  // 1. Stop cron manager
+  cronManager.stop();
+
+  // 2. Deny all pending permission requests (unblocks hook processes)
   await permServer.stop().catch(() => {});
 
-  // 2. Kill all agent subprocesses (SIGTERM → SIGKILL after 2s)
+  // 3. Kill all agent subprocesses (SIGTERM → SIGKILL after 2s)
   await Promise.all([claudeRunner.stopAll(), codexRunner.stopAll()]);
 
-  // 3. Stop Grammy poller
+  // 4. Stop Grammy poller
   await bot.stop().catch(() => {});
 
   process.exit(exitCode);
@@ -657,6 +678,16 @@ setInterval(() => {
 }, 30_000).unref();
 
 await permServer.start();
+
+// cron: when a job fires, enqueue the prompt and flush
+cronManager.onTrigger((chatId, prompt, jobName) => {
+  logger.info(`[chat:${chatId}] Cron "${jobName}" triggered`);
+  enqueue(chatId, `[Cron: ${jobName}] ${prompt}`, "cron");
+  if (!getRunner(chatId).isRunning(chatId)) {
+    scheduleFlush(chatId);
+  }
+});
+cronManager.start();
 
 bot.start({
   allowed_updates: ["message", "channel_post", "callback_query"],
