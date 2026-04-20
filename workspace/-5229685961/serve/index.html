@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PlayCraft Lab</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app">
+    <div class="settings-menu">
+      <button class="settings-button" id="settingsBtn" type="button" aria-label="设置" aria-expanded="false" aria-controls="settingsPanel">⚙</button>
+      <div class="settings-panel" id="settingsPanel" hidden>
+        <strong id="settingsTitle">设置</strong>
+        <div class="setting-row">
+          <span id="languageLabel">语言</span>
+          <div class="language-switch" aria-label="Language">
+            <button type="button" data-lang="zh">中文</button>
+            <button type="button" data-lang="en">EN</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <section class="choice-screen" id="choiceScreen" aria-label="选择游戏类型">
+      <div class="choice-copy">
+        <span class="brand-pill">PlayCraft Lab</span>
+        <h1>你想做什么游戏？</h1>
+        <p>先选一个可玩的原型。进去试玩，再从一个设计维度开始调。</p>
+      </div>
+
+      <div class="genre-grid">
+        <button class="genre-card featured" type="button" data-genre="platformer" data-badge="推荐起手式">
+          <span class="mini-scene platformer-art" aria-hidden="true"></span>
+          <strong>横版平台跳跃</strong>
+          <small>移动手感、跳跃弧线、收集物、敌人、终点旗</small>
+        </button>
+        <button class="genre-card" type="button" data-genre="collector">
+          <span class="mini-scene collector-art" aria-hidden="true"></span>
+          <strong>俯视角收集玩法</strong>
+          <small>移动判定、收集循环、分数反馈、追逐压力</small>
+        </button>
+        <button class="genre-card" type="button" data-genre="flyer">
+          <span class="mini-scene flyer-art" aria-hidden="true"></span>
+          <strong>街机躲避玩法</strong>
+          <small>速度曲线、生成节奏、读招与反应窗口</small>
+        </button>
+        <button class="genre-card" type="button" data-genre="puzzle">
+          <span class="mini-scene puzzle-art" aria-hidden="true"></span>
+          <strong>机关解谜关卡</strong>
+          <small>开关、钥匙、门、条件触发、解谜顺序</small>
+        </button>
+      </div>
+    </section>
+
+    <section class="studio" id="studio" hidden aria-label="横版跳跃游戏实验室">
+      <header class="studio-hud">
+        <div class="brand-lockup">
+          <button class="back-button" id="backBtn" type="button" aria-label="返回选择">←</button>
+          <div>
+            <span>Run & Jump Lab</span>
+            <h1 id="demoTitle">横版平台跳跃原型</h1>
+          </div>
+        </div>
+        <div class="progress-chip">
+          <span>LV <strong id="levelText">1</strong></span>
+          <div><i id="xpFill"></i></div>
+          <span><strong id="xpText">0</strong> XP</span>
+        </div>
+        <div class="header-actions">
+          <button class="reset-button" id="factoryResetBtn" type="button">重置原型</button>
+          <button class="save-button" id="saveBtn" type="button">保存版本</button>
+        </div>
+      </header>
+
+      <section class="play-zone">
+        <div class="canvas-shell">
+          <canvas id="gameCanvas" aria-label="横版平台跳跃原型"></canvas>
+          <div class="game-hud">
+            <span>收集物 <strong id="coinText">0</strong>/<strong id="coinTargetText">3</strong></span>
+            <span>生命值 <strong id="lifeText">3</strong></span>
+            <span id="feelTag">标准手感</span>
+          </div>
+          <div class="game-result" id="resultLayer" hidden>
+            <strong id="resultTitle">通关</strong>
+            <button id="restartBtn" type="button">再玩一次</button>
+          </div>
+        </div>
+
+        <aside class="guide-panel">
+          <div class="guide-head">
+            <div class="guide-face" aria-hidden="true"></div>
+            <div>
+              <span>Guide Sprite</span>
+              <strong id="guideTitle">先试玩</strong>
+            </div>
+          </div>
+          <p id="guideText">这个原型包含移动、跳跃、收集物、敌人和终点旗。先感受移动手感、跳跃弧线和关卡节奏。</p>
+
+          <div class="concept-stack" id="conceptStack">
+            <button class="concept active" type="button" data-concept="scene">
+              <span>1</span><strong>关卡主题</strong><small>世界观与可读性</small>
+            </button>
+            <button class="concept" type="button" data-concept="player">
+              <span>2</span><strong>玩家角色</strong><small>移动手感与跳跃弧线</small>
+            </button>
+            <button class="concept" type="button" data-concept="enemy">
+              <span>3</span><strong>敌人 AI</strong><small>压力、节奏与风险</small>
+            </button>
+            <button class="concept" type="button" data-concept="collision">
+              <span>4</span><strong>碰撞判定</strong><small>Hitbox 与公平性</small>
+            </button>
+            <button class="concept" type="button" data-concept="goal">
+              <span>5</span><strong>胜利条件</strong><small>目标、奖励与通关</small>
+            </button>
+            <button class="concept" type="button" data-concept="level">
+              <span>6</span><strong>关卡设计</strong><small>Layout、节奏与难度曲线</small>
+            </button>
+          </div>
+        </aside>
+      </section>
+
+      <section class="lab-deck">
+        <div class="tweak-panel">
+          <span class="label">调一个设计维度</span>
+          <h2 id="conceptTitle">关卡主题</h2>
+          <p id="conceptText">关卡主题不只是背景美术。它会影响玩家对地形、危险区、奖励路线和终点方向的判断。</p>
+          <div class="choice-row" id="choiceRow"></div>
+        </div>
+
+        <div class="prompt-panel">
+          <span class="label">描述你想要的手感</span>
+          <div class="agent-mode-switch" role="group" aria-label="Agent 模式">
+            <button type="button" data-agent-mode="guided">Guided</button>
+            <button type="button" data-agent-mode="wild">Wild</button>
+          </div>
+          <p class="mode-help" id="modeHelp">Guided 只调受控参数；Wild 会在当前项目沙箱里改代码。</p>
+          <form id="promptForm">
+            <textarea id="promptInput" rows="3">把移动速度调快一点，但保留可控的刹车距离，不要让玩家冲过平台。</textarea>
+            <button type="submit">让 AI 调参</button>
+          </form>
+          <div class="log" id="log"></div>
+        </div>
+      </section>
+
+      <div class="touch-controls" id="touchControls" hidden aria-label="触屏控制">
+        <div class="touch-dpad">
+          <button type="button" data-touch="left" aria-label="向左">←</button>
+          <button type="button" data-touch="right" aria-label="向右">→</button>
+        </div>
+        <button class="jump-button" type="button" data-touch="jump" aria-label="跳跃">跳</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>
